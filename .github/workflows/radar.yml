@@ -14,24 +14,23 @@ on:
           - 'true'
           - 'false'
 
-permissions:
-  contents: write
-
-concurrency:
-  group: vuln-radar-scan
-  cancel-in-progress: false
-
 jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+
+      - name: Restore seen alerts cache
+        uses: actions/cache/restore@v4
+        with:
+          path: seen_alerts.json
+          key: vuln-radar-state-${{ github.run_id }}
+          restore-keys: |
+            vuln-radar-state-
 
       - name: Install dependencies
         run: pip install requests feedparser
@@ -42,9 +41,8 @@ jobs:
           TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
         run: python radar.py
 
-      - name: Save state
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add seen_alerts.json
-          git diff --quiet && git diff --staged --quiet || (git commit -m "Update seen alerts" && git push)
+      - name: Save seen alerts cache
+        uses: actions/cache/save@v4
+        with:
+          path: seen_alerts.json
+          key: vuln-radar-state-${{ github.run_id }}

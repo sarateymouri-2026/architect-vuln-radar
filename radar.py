@@ -205,3 +205,12 @@ def check_rss_feeds(seen):
 
 def main():
     print(f"Starting Architect Radar Scan (TEST_MODE={TEST_MODE})...")
+    seen = load_seen()
+    check_cisa_kev(seen)
+    check_osv_ai_cloud(seen)
+    check_rss_feeds(seen)
+    save_seen(seen)
+    print("Radar scan finished cleanly.")
+
+if __name__ == "__main__":
+    main()

@@ -1,12 +1,27 @@
+import base64
 import json
 import os
 import re
+import ssl
+import certifi
 import requests
+from requests.adapters import HTTPAdapter
 import feedparser
 
 STATE_FILE = "seen_alerts.json"
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 TEST_MODE = os.environ.get("TEST_MODE", "false").lower() == "true"
+
+# Enforce strict TLS 1.2+ and verified CA certificates on every connection
+class StrictTLSAdapter(HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = ssl.create_default_context(cafile=certifi.where())
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        kwargs["ssl_context"] = ctx
+        return super().init_poolmanager(*args, **kwargs)
+
+session = requests.Session()
+session.mount("https://", StrictTLSAdapter())
 
 # Tailored Architect Stack: SASE, NGFW, NAC, Cloud/Identity, AI/MCP & Financial
 KEYWORDS = [
@@ -29,8 +44,8 @@ KEYWORDS = [
     "swift", "dora", "weblogic", "oracle", "sap", "f5", "big-ip", "ivanti", "citrix", "netscaler"
 ]
 
-def build_url(scheme, host, path):
-    return f"{scheme}://{host}{path}"
+def decode_url(b64_str):
+    return base64.b64decode(b64_str).decode("utf-8")
 
 def clean_html(raw_html):
     text = re.sub(r"<[^>]+>", " ", raw_html or "")
@@ -63,23 +78,27 @@ def get_architect_action(text_blob):
     return "Assess exposure across perimeter, SASE, and cloud control planes; coordinate urgent patch window."
 
 def send_architect_report(category, source, title, impact, action, link):
+    if not WEBHOOK_URL:
+        return
+    if not WEBHOOK_URL.startswith("https://"):
+        raise ValueError("Security Policy Violation: WEBHOOK_URL must use HTTPS/TLS.")
     message = (
         f"🛡️ *[{category}] — {source}*\n"
         f"*Advisory:* <{link}|{title}>\n"
         f"*Architectural Impact:* {impact}\n"
         f"*Recommended Action:* {action}"
     )
-    if WEBHOOK_URL:
-        try:
-            resp = requests.post(WEBHOOK_URL, json={"text": message}, timeout=15)
-            print(f"Slack delivered ({resp.status_code}): {title[:55]}")
-        except Exception as e:
-            print(f"Slack post failed: {e}")
+    try:
+        resp = session.post(WEBHOOK_URL, json={"text": message}, timeout=15)
+        print(f"Slack delivered ({resp.status_code}): {title[:55]}")
+    except Exception as e:
+        print(f"Slack post failed: {e}")
 
 def check_cisa_kev(seen):
     try:
-        url = build_url("https", "://githubusercontent.com", "/cisagov/kev-data/main/known_exploited_vulnerabilities.json")
-        resp = requests.get(url, timeout=20)
+        # https://githubusercontent.com
+        url = decode_url("aHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL2Npc2Fnb3Yva2V2LWRhdGEvbWFpbi9rbm93bl9leHBsb2l0ZWRfdnVsbmVyYWJpbGl0aWVzLmpzb24=")
+        resp = session.get(url, timeout=20)
         if resp.status_code != 200:
             print(f"CISA KEV HTTP {resp.status_code}")
             return
@@ -93,14 +112,14 @@ def check_cisa_kev(seen):
             if not matches_stack(blob):
                 continue
             if uid not in seen or (TEST_MODE and sent < 2):
-                cve_link = build_url("https", "www.cve.org", f"/CVERecord?id={cve_id}")
+                cve_base = decode_url("aHR0cHM6Ly93d3cuY3ZlLm9yZy9DVkVSZWNvcmQ/aWQ9")
                 send_architect_report(
                     "ACTIVE EXPLOIT (CISA KEV)",
                     f"{v.get('vendorProject')} {v.get('product')}",
                     f"{cve_id}: {v.get('vulnerabilityName')}",
                     f"Confirmed exploitation in the wild (Added: {v.get('dateAdded')}).",
                     f"{v.get('requiredAction')} (Due: {v.get('dueDate')}).",
-                    cve_link
+                    f"{cve_base}{cve_id}"
                 )
                 sent += 1
             seen.add(uid)
@@ -110,7 +129,9 @@ def check_cisa_kev(seen):
 
 def check_osv_ai_cloud(seen):
     try:
-        api_url = build_url("https", "api.osv.dev", "/v1/query")
+        # https://osv.dev
+        api_url = decode_url("aHR0cHM6Ly9hcGkub3N2LmRldi92MS9xdWVyeQ==")
+        osv_base = decode_url("aHR0cHM6Ly9vc3YuZGV2L3Z1bG5lcmFiaWxpdHkv")
         packages = [
             ("PyPI", "mcp"),
             ("PyPI", "langchain-core"),
@@ -119,7 +140,7 @@ def check_osv_ai_cloud(seen):
         ]
         sent = 0
         for eco, pkg in packages:
-            resp = requests.post(api_url, json={"package": {"ecosystem": eco, "name": pkg}}, timeout=15)
+            resp = session.post(api_url, json={"package": {"ecosystem": eco, "name": pkg}}, timeout=15)
             if resp.status_code != 200:
                 continue
             vulns = resp.json().get("vulns", [])[-3:]
@@ -130,14 +151,13 @@ def check_osv_ai_cloud(seen):
                     continue
                 if uid not in seen or (TEST_MODE and sent < 1):
                     summary = clean_html(v.get("summary") or v.get("details", "Vulnerability detected"))[:220]
-                    osv_link = build_url("https", "osv.dev", f"/vulnerability/{vid}")
                     send_architect_report(
                         "AI / MCP / CLOUD SUPPLY CHAIN",
                         f"OSV ({pkg})",
                         vid,
                         summary,
                         "Audit MCP server permissions, AI agent dependencies, and Kubernetes workloads.",
-                        osv_link
+                        f"{osv_base}{vid}"
                     )
                     sent += 1
                 seen.add(uid)
@@ -146,22 +166,22 @@ def check_osv_ai_cloud(seen):
         print(f"OSV error: {e}")
 
 def check_rss_feeds(seen):
-    # Only verified direct XML endpoints that never 403 on GitHub Actions
+    # Base64-encoded HTTPS URLs prevent browser clipboard domain stripping
     feeds = [
-        ("MICROSOFT CLOUD & INFRA", "Microsoft MSRC", "://microsoft.com", "/update-guide/rss", False),
-        ("NGFW & SASE PSIRT", "Palo Alto Networks PSIRT", "://paloaltonetworks.com", "/rss.xml", True),
-        ("NGFW & SASE PSIRT", "FortiGuard PSIRT", "://fortinet.com", "/fortiguard/rss/ir.xml", True),
-        ("NGFW & SASE RESEARCH", "Check Point Research", "://checkpoint.com", "/category/threat-intelligence-reports/feed/", True),
-        ("NAC & FIREWALL PSIRT", "Cisco Security Advisories", "://cisco.com", "/security/center/psirtrss20/CiscoSecurityAdvisory.xml", False),
-        ("THREAT INTELLIGENCE", "Palo Alto Unit 42", "://paloaltonetworks.com", "/feed/", True),
-        ("SPAIN / EU CERT", "INCIBE-CERT", "www.incibe.es", "/incibe-cert/alerta-temprana/avisos/feed", False),
-        ("ZERO-DAYS & ZSCALER/CP INTEL", "The Hacker News", "://feedburner.com", "/TheHackersNews", False),
-        ("SASE & BREACH INTEL", "BleepingComputer", "://bleepingcomputer.com", "/feed/", False)
+        ("MICROSOFT CLOUD & INFRA", "Microsoft MSRC", "aHR0cHM6Ly9hcGkubXNyYy5taWNyb3NvZnQuY29tL3VwZGF0ZS1ndWlkZS9yc3M=", False),
+        ("NGFW & SASE PSIRT", "Palo Alto Networks PSIRT", "aHR0cHM6Ly9zZWN1cml0eS5wYWxvYWx0b25ldHdvcmtzLmNvbS9yc3MueG1s", True),
+        ("NGFW & SASE PSIRT", "FortiGuard PSIRT", "aHR0cHM6Ly9maWxlc3RvcmUuZm9ydGluZXQuY29tL2ZvcnRpZ3VhcmQvcnNzL2lyLnhtbA==", True),
+        ("NGFW & SASE RESEARCH", "Check Point Research", "aHR0cHM6Ly9yZXNlYXJjaC5jaGVja3BvaW50LmNvbS9jYXRlZ29yeS90aHJlYXQtaW50ZWxsaWdlbmNlLXJlcG9ydHMvZmVlZC8=", True),
+        ("NAC & FIREWALL PSIRT", "Cisco Security Advisories", "aHR0cHM6Ly9zZWMuY2xvdWRhcHBzLmNpc2NvLmNvbS9zZWN1cml0eS9jZW50ZXIvcHNpcnRyc3MyMC9DaXNjb1NlY3VyaXR5QWR2aXNvcnkueG1s", False),
+        ("THREAT INTELLIGENCE", "Palo Alto Unit 42", "aHR0cHM6Ly91bml0NDIucGFsb2FsdG9uZXR3b3Jrcy5jb20vZmVlZC8=", True),
+        ("SPAIN / EU CERT", "INCIBE-CERT", "aHR0cHM6Ly93d3cuaW5jaWJlLmVzL2luY2liZS1jZXJ0L2FsZXJ0YS10ZW1wcmFuYS9hdmlzb3MvZmVlZA==", False),
+        ("ZERO-DAYS & ZSCALER/CP INTEL", "The Hacker News", "aHR0cHM6Ly9mZWVkcy5mZWVkYnVybmVyLmNvbS9UaGVIYWNrZXJzTmV3cw==", False),
+        ("SASE & BREACH INTEL", "BleepingComputer", "aHR0cHM6Ly93d3cuYmxlZXBpbmdjb21wdXRlci5jb20vZmVlZC8=", False)
     ]
-    for category, source_name, host, path, is_direct_vendor in feeds:
+    for category, source_name, b64_url, is_direct_vendor in feeds:
         try:
-            feed_url = build_url("https", host, path)
-            resp = requests.get(feed_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
+            feed_url = decode_url(b64_url)
+            resp = session.get(feed_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
             parsed = feedparser.parse(resp.content)
             limit = 60 if "Microsoft MSRC" in source_name else 15
             entries = parsed.entries[:limit]
@@ -182,35 +202,3 @@ def check_rss_feeds(seen):
                     seen.add(uid)
                     continue
 
-                if not is_direct_vendor and not matches_stack(text_blob):
-                    seen.add(uid)
-                    continue
-
-                if uid not in seen or (TEST_MODE and sent < 1 and ("Microsoft MSRC" in source_name or is_direct_vendor)):
-                    impact_text = summary[:220] + "..." if summary else "Official vendor advisory published for your SASE/Firewall/Cloud stack."
-                    action_text = get_architect_action(text_blob)
-                    send_architect_report(
-                        category,
-                        source_name,
-                        title,
-                        impact_text,
-                        action_text,
-                        entry.get("link", "")
-                    )
-                    sent += 1
-                seen.add(uid)
-            print(f"{source_name} check completed (parsed {len(entries)} items). Sent {sent} alerts.")
-        except Exception as e:
-            print(f"{source_name} skipped: {e}")
-
-def main():
-    print(f"Starting Architect Radar Scan (TEST_MODE={TEST_MODE})...")
-    seen = load_seen()
-    check_cisa_kev(seen)
-    check_osv_ai_cloud(seen)
-    check_rss_feeds(seen)
-    save_seen(seen)
-    print("Radar scan finished cleanly.")
-
-if __name__ == "__main__":
-    main()

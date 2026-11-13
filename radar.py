@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import re
+from datetime import datetime, timezone
 import certifi
 import requests
 import feedparser
@@ -10,28 +11,23 @@ STATE_FILE = "seen_alerts.json"
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 TEST_MODE = os.environ.get("TEST_MODE", "false").lower() == "true"
 
-# Enforce strict CA certificate verification via certifi
 session = requests.Session()
 session.verify = certifi.where()
 
-# Tailored Architect Stack: SASE, NGFW, NAC, Cloud/Identity, AI/MCP & Financial
+STATS = {"critical": 0, "vendor": 0, "ai_cloud": 0}
+
 KEYWORDS = [
-    # SASE & Zero Trust
     "zscaler", "zia", "zpa", "client connector", "zdx",
     "prisma access", "prisma sase", "fortisase", "harmony sase", "harmony connect",
-    # NGFW, VPN & NAC
     "palo alto", "pan-os", "panorama", "globalprotect",
     "fortinet", "fortigate", "fortios", "fortimanager", "fortianalyzer", "fortiproxy",
     "check point", "checkpoint", "quantum", "gaia", "smartconsole",
     "cisco ise", "identity services engine", "cisco asa", "ftd", "firepower",
-    # Microsoft Cloud, Identity & Infrastructure
     "azure", "entra", "active directory", "exchange", "sharepoint", "ad fs",
     "mcp gateway", "agents sdk", "openai", "copilot", "kubernetes", "devops",
     "dns server", "dhcp server", "rd gateway", "remote desktop gateway", "rras", "nps",
-    # AWS, AI/MCP & CI/CD
     "aws", "amazon web services", "mcp", "model context protocol", "langchain",
     "gitlab", "github", "terraform", "docker", "argocd",
-    # Financial / EU Core
     "swift", "dora", "weblogic", "oracle", "sap", "f5", "big-ip", "ivanti", "citrix", "netscaler"
 ]
 
@@ -73,17 +69,79 @@ def send_architect_report(category, source, title, impact, action, link):
         return
     if not WEBHOOK_URL.startswith("https://"):
         raise ValueError("Security Policy Violation: WEBHOOK_URL must use HTTPS/TLS.")
-    message = (
-        f"🛡️ *[{category}] — {source}*\n"
-        f"*Advisory:* <{link}|{title}>\n"
-        f"*Architectural Impact:* {impact}\n"
-        f"*Recommended Action:* {action}"
-    )
+
+    cat_upper = category.upper()
+    if "ACTIVE EXPLOIT" in cat_upper or "ZERO-DAY" in cat_upper:
+        color = "#E01E5A"
+        badge = "🔴 CRITICAL / ACTIVE EXPLOIT"
+        STATS["critical"] += 1
+    elif "AI / MCP" in cat_upper or "SUPPLY CHAIN" in cat_upper:
+        color = "#9B59B6"
+        badge = "🟣 AI / MCP / CLOUD"
+        STATS["ai_cloud"] += 1
+    else:
+        color = "#ECB22E"
+        badge = "🟠 VENDOR / SASE / NGFW"
+        STATS["vendor"] += 1
+
+    payload = {
+        "attachments": [
+            {
+                "color": color,
+                "blocks": [
+                    {
+                        "type": "context",
+                        "elements": [{"type": "mrkdwn", "text": f"*{badge}*  |  *Source:* {source}"}]
+                    },
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": f"*<{link}|{title}>*\n{impact}"}
+                    },
+                    {
+                        "type": "context",
+                        "elements": [{"type": "mrkdwn", "text": f"🛠️ *Architect Action:* {action}"}]
+                    }
+                ]
+            }
+        ]
+    }
     try:
-        resp = session.post(WEBHOOK_URL, json={"text": message}, timeout=15)
+        resp = session.post(WEBHOOK_URL, json=payload, timeout=15)
         print(f"Slack delivered ({resp.status_code}): {title[:55]}")
     except Exception as e:
         print(f"Slack post failed: {e}")
+
+def send_dashboard_summary():
+    total = STATS["critical"] + STATS["vendor"] + STATS["ai_cloud"]
+    if total == 0 or not WEBHOOK_URL:
+        return
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    payload = {
+        "attachments": [
+            {
+                "color": "#2EB67D",
+                "blocks": [
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                f"📊 *Architect Radar Scan Summary* ({now_utc})\n"
+                                f"• 🔴 *Critical / Active Exploits:* {STATS['critical']}\n"
+                                f"• 🟠 *NGFW / SASE / Infra Advisories:* {STATS['vendor']}\n"
+                                f"• 🟣 *AI / MCP / Cloud Supply Chain:* {STATS['ai_cloud']}"
+                            )
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    try:
+        session.post(WEBHOOK_URL, json=payload, timeout=15)
+        print("Dashboard summary card delivered.")
+    except Exception as e:
+        print(f"Summary post failed: {e}")
 
 def check_cisa_kev(seen):
     try:
@@ -163,53 +221,3 @@ def check_rss_feeds(seen):
         ("NAC & FIREWALL PSIRT", "Cisco Security Advisories", "aHR0cHM6Ly9zZWMuY2xvdWRhcHBzLmNpc2NvLmNvbS9zZWN1cml0eS9jZW50ZXIvcHNpcnRyc3MyMC9DaXNjb1NlY3VyaXR5QWR2aXNvcnkueG1s", False),
         ("THREAT INTELLIGENCE", "Palo Alto Unit 42", "aHR0cHM6Ly91bml0NDIucGFsb2FsdG9uZXR3b3Jrcy5jb20vZmVlZC8=", True),
         ("SPAIN / EU CERT", "INCIBE-CERT", "aHR0cHM6Ly93d3cuaW5jaWJlLmVzL2luY2liZS1jZXJ0L2FsZXJ0YS10ZW1wcmFuYS9hdmlzb3MvZmVlZA==", False),
-        ("ZERO-DAYS & ZSCALER/CP INTEL", "The Hacker News", "aHR0cHM6Ly9mZWVkcy5mZWVkYnVybmVyLmNvbS9UaGVIYWNrZXJzTmV3cw==", False),
-        ("SASE & BREACH INTEL", "BleepingComputer", "aHR0cHM6Ly93d3cuYmxlZXBpbmdjb21wdXRlci5jb20vZmVlZC8=", False)
-    ]
-    for category, source_name, b64_url, is_direct_vendor in feeds:
-        try:
-            feed_url = decode_url(b64_url)
-            resp = session.get(feed_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
-            parsed = feedparser.parse(resp.content)
-            limit = 60 if "Microsoft MSRC" in source_name else 15
-            entries = parsed.entries[:limit]
-            sent = 0
-            for entry in entries:
-                uid = f"RSS-{entry.get('id', entry.get('link'))}"
-                title = clean_html(entry.get("title", "New Advisory"))
-                summary = clean_html(entry.get("summary", ""))
-                text_blob = f"{title} {summary}"
-
-                if "Microsoft MSRC" in source_name and "informational change only" in summary.lower():
-                    seen.add(uid)
-                    continue
-
-                if "Palo Alto" in source_name and "(Severity: LOW)" in title:
-                    seen.add(uid)
-                    continue
-
-                if not is_direct_vendor and not matches_stack(text_blob):
-                    seen.add(uid)
-                    continue
-
-                if uid not in seen or (TEST_MODE and sent < 1 and ("Microsoft MSRC" in source_name or is_direct_vendor)):
-                    impact_text = summary[:220] + "..." if summary else "Official vendor advisory published."
-                    action_text = get_architect_action(text_blob)
-                    send_architect_report(category, source_name, title, impact_text, action_text, entry.get("link", ""))
-                    sent += 1
-                seen.add(uid)
-            print(f"{source_name} check completed (parsed {len(entries)} items). Sent {sent} alerts.")
-        except Exception as e:
-            print(f"{source_name} skipped: {e}")
-
-def main():
-    print(f"Starting Architect Radar Scan (TEST_MODE={TEST_MODE})...")
-    seen = load_seen()
-    check_cisa_kev(seen)
-    check_osv_ai_cloud(seen)
-    check_rss_feeds(seen)
-    save_seen(seen)
-    print("Radar scan finished cleanly.")
-
-if __name__ == "__main__":
-    main()

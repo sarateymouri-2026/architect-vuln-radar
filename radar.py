@@ -22,6 +22,9 @@ KEYWORDS = [
     "oracle", "weblogic", "sap", "swift", "red hat", "openssl", "nginx"
 ]
 
+def build_url(scheme, host, path):
+    return f"{scheme}://{host}{path}"
+
 def load_seen():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
@@ -44,20 +47,18 @@ def send_alert(source, title, summary, link):
     if WEBHOOK_URL:
         try:
             resp = requests.post(WEBHOOK_URL, json={"text": message}, timeout=15)
-            print(f"Slack delivered ({resp.status_code}): {title[:60]}")
+            print(f"Slack delivered ({resp.status_code}): {title[:55]}")
         except Exception as e:
             print(f"Slack post failed: {e}")
 
-def check_cisa_kev_github_mirror(seen):
+def check_cisa_kev(seen):
     try:
-        # Official CISA KEV GitHub mirror (zero Cloudflare WAF blocks on GitHub Actions)
-        url = "https://githubusercontent.com"
+        url = build_url("https", "raw.githubusercontent.com", "/cisagov/kev-data/main/known_exploited_vulnerabilities.json")
         resp = requests.get(url, timeout=20)
         if resp.status_code != 200:
-            print(f"CISA KEV mirror HTTP {resp.status_code}")
+            print(f"CISA KEV HTTP {resp.status_code}")
             return
         vulns = resp.json().get("vulnerabilities", [])
-        # Sort newest first by dateAdded
         vulns_sorted = sorted(vulns, key=lambda x: x.get("dateAdded", ""), reverse=True)[:40]
         sent = 0
         for v in vulns_sorted:
@@ -67,11 +68,12 @@ def check_cisa_kev_github_mirror(seen):
             if not matches_stack(blob):
                 continue
             if uid not in seen or (TEST_MODE and sent < 2):
+                cve_link = build_url("https", "www.cve.org", f"/CVERecord?id={cve_id}")
                 send_alert(
                     "CISA KEV - ACTIVE EXPLOIT",
                     f"{cve_id} ({v.get('vendorProject')} {v.get('product')})",
                     f"{v.get('vulnerabilityName')} | Due: {v.get('dueDate')} | {v.get('requiredAction')}",
-                    f"https://cve.org{cve_id}"
+                    cve_link
                 )
                 sent += 1
             seen.add(uid)
@@ -81,7 +83,7 @@ def check_cisa_kev_github_mirror(seen):
 
 def check_osv_ai_cloud(seen):
     try:
-        # Google OSV.dev API (unthrottled) - checks critical AI/MCP & Cloud packages
+        api_url = build_url("https", "api.osv.dev", "/v1/query")
         packages = [
             ("PyPI", "mcp"),
             ("PyPI", "langchain"),
@@ -91,11 +93,7 @@ def check_osv_ai_cloud(seen):
         ]
         sent = 0
         for eco, pkg in packages:
-            resp = requests.post(
-                "https://osv.dev",
-                json={"package": {"ecosystem": eco, "name": pkg}},
-                timeout=15
-            )
+            resp = requests.post(api_url, json={"package": {"ecosystem": eco, "name": pkg}}, timeout=15)
             if resp.status_code != 200:
                 continue
             vulns = resp.json().get("vulns", [])[-5:]
@@ -106,11 +104,12 @@ def check_osv_ai_cloud(seen):
                     continue
                 if uid not in seen or (TEST_MODE and sent < 1):
                     summary = v.get("summary") or v.get("details", "Vulnerability detected")[:220]
+                    osv_link = build_url("https", "osv.dev", f"/vulnerability/{vid}")
                     send_alert(
                         f"AI / MCP / Cloud Supply Chain ({pkg})",
                         vid,
                         summary[:240],
-                        f"https://osv.dev{vid}"
+                        osv_link
                     )
                     sent += 1
                 seen.add(uid)
@@ -119,20 +118,20 @@ def check_osv_ai_cloud(seen):
         print(f"OSV error: {e}")
 
 def check_rss_feeds(seen):
-    feeds = {
-        "Palo Alto Networks PSIRT": ("https://paloaltonetworks.com", True),
-        "FortiGuard PSIRT": ("https://fortinet.com", True),
-        "Cisco Security Advisories": ("https://cisco.com", True),
-        "CISA Advisories": ("https://cisa.gov", True),
-        "Unit 42 (Palo Alto Intel)": ("https://paloaltonetworks.com", True),
-        "The Hacker News (Check Point/Zscaler/Zero-Days)": ("https://feedburner.com", False),
-        "BleepingComputer (SASE/Firewalls/Breaches)": ("https://bleepingcomputer.com", False),
-        "SecurityWeek (Enterprise/Financial/ICS)": ("https://feedburner.com", False)
-    }
-    for source_name, (feed_url, is_direct_vendor) in feeds.items():
+    feeds = [
+        ("Palo Alto Networks PSIRT", "://paloaltonetworks.com", "/rss.xml", True),
+        ("FortiGuard PSIRT", "://fortinet.com", "/rss/ir.xml", True),
+        ("Cisco Security Advisories", "://cisco.com", "/security/center/psirtrss20/CiscoSecurityAdvisory.xml", True),
+        ("CISA Advisories", "www.cisa.gov", "/cybersecurity-advisories/all.xml", True),
+        ("Unit 42 (Palo Alto Intel)", "://paloaltonetworks.com", "/feed/", True),
+        ("The Hacker News (Check Point/Zscaler/Zero-Days)", "://feedburner.com", "/TheHackersNews", False),
+        ("BleepingComputer (SASE/Firewalls/Breaches)", "://bleepingcomputer.com", "/feed/", False),
+        ("SecurityWeek (Enterprise/Financial/ICS)", "://feedburner.com", "/securityweek", False)
+    ]
+    for source_name, host, path, is_direct_vendor in feeds:
         try:
-            resp = requests.get(feed_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
-            parsed = feedparser.parse(resp.content)
+            feed_url = build_url("https", host, path)
+            parsed = feedparser.parse(feed_url, agent="Mozilla/5.0")
             entries = parsed.entries[:15]
             sent = 0
             for entry in entries:
@@ -156,7 +155,7 @@ def check_rss_feeds(seen):
 def main():
     print(f"Starting Radar Scan (TEST_MODE={TEST_MODE})...")
     seen = load_seen()
-    check_cisa_kev_github_mirror(seen)
+    check_cisa_kev(seen)
     check_osv_ai_cloud(seen)
     check_rss_feeds(seen)
     save_seen(seen)

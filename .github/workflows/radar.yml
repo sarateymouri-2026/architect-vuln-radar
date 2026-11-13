@@ -4,6 +4,15 @@ on:
   schedule:
     - cron: '23 * * * *'
   workflow_dispatch:
+    inputs:
+      test_mode:
+        description: 'Send sample alerts now to verify Slack delivery'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 permissions:
   contents: write
@@ -24,6 +33,7 @@ jobs:
       - name: Run Architect Radar
         env:
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          TEST_MODE: ${{ github.event.inputs.test_mode || 'false' }}
         run: python radar.py
 
       - name: Save state

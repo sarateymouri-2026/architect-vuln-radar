@@ -180,12 +180,10 @@ def check_rss_feeds(seen):
                 summary = clean_html(entry.get("summary", ""))
                 text_blob = f"{title} {summary}"
 
-                # Strip out MSRC acknowledgement-only edits
                 if "Microsoft MSRC" in source_name and "informational change only" in summary.lower():
                     seen.add(uid)
                     continue
 
-                # Skip LOW severity noise from Palo Alto
                 if "Palo Alto" in source_name and "(Severity: LOW)" in title:
                     seen.add(uid)
                     continue
@@ -195,9 +193,23 @@ def check_rss_feeds(seen):
                     continue
 
                 if uid not in seen or (TEST_MODE and sent < 1 and ("Microsoft MSRC" in source_name or is_direct_vendor)):
-                    impact_text = summary[:220] + "..." if summary else "Official vendor advisory published for your SASE/Firewall/Cloud stack."
+                    impact_text = summary[:220] + "..." if summary else "Official vendor advisory published."
                     action_text = get_architect_action(text_blob)
-                    send_architect_report(
-                        category,
-                        source_name,
-                        title,
+                    send_architect_report(category, source_name, title, impact_text, action_text, entry.get("link", ""))
+                    sent += 1
+                seen.add(uid)
+            print(f"{source_name} check completed (parsed {len(entries)} items). Sent {sent} alerts.")
+        except Exception as e:
+            print(f"{source_name} skipped: {e}")
+
+def main():
+    print(f"Starting Architect Radar Scan (TEST_MODE={TEST_MODE})...")
+    seen = load_seen()
+    check_cisa_kev(seen)
+    check_osv_ai_cloud(seen)
+    check_rss_feeds(seen)
+    save_seen(seen)
+    print("Radar scan finished cleanly.")
+
+if __name__ == "__main__":
+    main()

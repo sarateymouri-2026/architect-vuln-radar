@@ -1,5 +1,3 @@
-import csv
-import io
 import json
 import os
 import requests
@@ -7,6 +5,7 @@ import feedparser
 
 STATE_FILE = "seen_alerts.json"
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+TEST_MODE = os.environ.get("TEST_MODE", "false").lower() == "true"
 
 KEYWORDS = [
     # Firewalls & SASE
@@ -45,101 +44,103 @@ def send_alert(source, title, summary, link):
     if WEBHOOK_URL:
         try:
             resp = requests.post(WEBHOOK_URL, json={"text": message}, timeout=15)
-            print(f"Slack status: {resp.status_code}")
+            print(f"Slack delivered ({resp.status_code}): {title[:60]}")
         except Exception as e:
             print(f"Slack post failed: {e}")
 
-def check_cisa_kev_csv(seen):
+def check_cisa_kev_github_mirror(seen):
     try:
-        # Official CISA KEV CSV (bypasses JSON WAF blocks on cloud runners)
-        url = "https://cisa.gov"
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
-        if resp.status_code != 200 or "cveID" not in resp.text[:200]:
-            print(f"CISA KEV CSV status: {resp.status_code}")
+        # Official CISA KEV GitHub mirror (zero Cloudflare WAF blocks on GitHub Actions)
+        url = "https://githubusercontent.com"
+        resp = requests.get(url, timeout=20)
+        if resp.status_code != 200:
+            print(f"CISA KEV mirror HTTP {resp.status_code}")
             return
-        reader = csv.DictReader(io.StringIO(resp.text))
-        rows = list(reader)
+        vulns = resp.json().get("vulnerabilities", [])
+        # Sort newest first by dateAdded
+        vulns_sorted = sorted(vulns, key=lambda x: x.get("dateAdded", ""), reverse=True)[:40]
         sent = 0
-        # Check the 40 most recent KEV additions
-        for row in rows[:40]:
-            cve_id = row.get("cveID", "")
+        for v in vulns_sorted:
+            cve_id = v.get("cveID", "")
             uid = f"KEV-{cve_id}"
-            if uid in seen or not cve_id:
+            blob = f"{v.get('vendorProject', '')} {v.get('product', '')} {v.get('vulnerabilityName', '')}"
+            if not matches_stack(blob):
                 continue
-            blob = f"{row.get('vendorProject', '')} {row.get('product', '')} {row.get('vulnerabilityName', '')}"
-            if matches_stack(blob):
+            if uid not in seen or (TEST_MODE and sent < 2):
                 send_alert(
                     "CISA KEV - ACTIVE EXPLOIT",
-                    f"{cve_id} ({row.get('vendorProject')} {row.get('product')})",
-                    f"{row.get('vulnerabilityName')} | Action: {row.get('requiredAction')}",
+                    f"{cve_id} ({v.get('vendorProject')} {v.get('product')})",
+                    f"{v.get('vulnerabilityName')} | Due: {v.get('dueDate')} | {v.get('requiredAction')}",
                     f"https://cve.org{cve_id}"
                 )
                 sent += 1
             seen.add(uid)
-        print(f"CISA KEV CSV check completed. Sent {sent} alerts.")
+        print(f"CISA KEV check completed (scanned {len(vulns)} total). Sent {sent} alerts.")
     except Exception as e:
-        print(f"CISA KEV CSV error: {e}")
+        print(f"CISA KEV error: {e}")
 
-def check_redhat_cve_api(seen):
+def check_osv_ai_cloud(seen):
     try:
-        # Unthrottled Red Hat Security Data API (covers Linux, OpenSSL, Kubernetes, Cloud, Financial middleware)
-        url = "https://redhat.com"
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
-        if resp.status_code != 200:
-            print(f"Red Hat API status: {resp.status_code}")
-            return
-        items = resp.json()
+        # Google OSV.dev API (unthrottled) - checks critical AI/MCP & Cloud packages
+        packages = [
+            ("PyPI", "mcp"),
+            ("PyPI", "langchain"),
+            ("PyPI", "langchain-core"),
+            ("npm", "@modelcontextprotocol/sdk"),
+            ("Go", "k8s.io/kubernetes")
+        ]
         sent = 0
-        for item in items:
-            cve_id = item.get("CVE", "")
-            uid = f"RH-{cve_id}"
-            if uid in seen or not cve_id:
+        for eco, pkg in packages:
+            resp = requests.post(
+                "https://osv.dev",
+                json={"package": {"ecosystem": eco, "name": pkg}},
+                timeout=15
+            )
+            if resp.status_code != 200:
                 continue
-            severity = str(item.get("severity", "")).lower()
-            desc = item.get("bugzilla_description", "")
-            if severity in ["critical", "important"] and matches_stack(desc):
-                send_alert(
-                    f"Enterprise CVE ({severity.upper()})",
-                    cve_id,
-                    desc[:260] + "...",
-                    f"https://cve.org{cve_id}"
-                )
-                sent += 1
-            seen.add(uid)
-        print(f"Enterprise CVE check completed. Sent {sent} alerts.")
+            vulns = resp.json().get("vulns", [])[-5:]
+            for v in vulns:
+                vid = v.get("id", "")
+                uid = f"OSV-{vid}"
+                if not vid:
+                    continue
+                if uid not in seen or (TEST_MODE and sent < 1):
+                    summary = v.get("summary") or v.get("details", "Vulnerability detected")[:220]
+                    send_alert(
+                        f"AI / MCP / Cloud Supply Chain ({pkg})",
+                        vid,
+                        summary[:240],
+                        f"https://osv.dev{vid}"
+                    )
+                    sent += 1
+                seen.add(uid)
+        print(f"OSV AI/MCP/Cloud check completed. Sent {sent} alerts.")
     except Exception as e:
-        print(f"Enterprise CVE error: {e}")
+        print(f"OSV error: {e}")
 
 def check_rss_feeds(seen):
-    # Direct Vendor PSIRTs + Threat Intel covering Palo Alto, Fortinet, Cisco, Check Point, Zscaler, AI/MCP, Cloud, Financial
     feeds = {
-        "Palo Alto Networks PSIRT": "https://paloaltonetworks.com",
-        "FortiGuard PSIRT": "https://fortinet.com",
-        "Cisco Security Advisories": "https://cisco.com",
-        "CISA Advisories": "https://cisa.gov",
-        "Unit 42 (Palo Alto Intel)": "https://paloaltonetworks.com",
-        "The Hacker News (Zero-Days/AI/SASE)": "https://feedburner.com",
-        "BleepingComputer (Check Point/Zscaler/Breaches)": "https://bleepingcomputer.com",
-        "SecurityWeek (Enterprise/Financial/ICS)": "https://feedburner.com"
+        "Palo Alto Networks PSIRT": ("https://paloaltonetworks.com", True),
+        "FortiGuard PSIRT": ("https://fortinet.com", True),
+        "Cisco Security Advisories": ("https://cisco.com", True),
+        "CISA Advisories": ("https://cisa.gov", True),
+        "Unit 42 (Palo Alto Intel)": ("https://paloaltonetworks.com", True),
+        "The Hacker News (Check Point/Zscaler/Zero-Days)": ("https://feedburner.com", False),
+        "BleepingComputer (SASE/Firewalls/Breaches)": ("https://bleepingcomputer.com", False),
+        "SecurityWeek (Enterprise/Financial/ICS)": ("https://feedburner.com", False)
     }
-    for source_name, feed_url in feeds.items():
+    for source_name, (feed_url, is_direct_vendor) in feeds.items():
         try:
             resp = requests.get(feed_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
             parsed = feedparser.parse(resp.content)
+            entries = parsed.entries[:15]
             sent = 0
-            for entry in parsed.entries[:15]:
+            for entry in entries:
                 uid = f"RSS-{entry.get('id', entry.get('link'))}"
-                if uid in seen:
-                    continue
                 text_blob = f"{entry.get('title', '')} {entry.get('summary', '')}"
-                is_direct_vendor = source_name in [
-                    "Palo Alto Networks PSIRT",
-                    "FortiGuard PSIRT",
-                    "Cisco Security Advisories",
-                    "CISA Advisories",
-                    "Unit 42 (Palo Alto Intel)"
-                ]
-                if is_direct_vendor or matches_stack(text_blob):
+                if not is_direct_vendor and not matches_stack(text_blob):
+                    continue
+                if uid not in seen or (TEST_MODE and sent < 1 and is_direct_vendor):
                     send_alert(
                         source_name,
                         entry.get("title", "New Advisory"),
@@ -148,14 +149,15 @@ def check_rss_feeds(seen):
                     )
                     sent += 1
                 seen.add(uid)
-            print(f"{source_name} check completed. Sent {sent} alerts.")
+            print(f"{source_name} check completed (parsed {len(entries)} items). Sent {sent} alerts.")
         except Exception as e:
             print(f"{source_name} skipped: {e}")
 
 def main():
+    print(f"Starting Radar Scan (TEST_MODE={TEST_MODE})...")
     seen = load_seen()
-    check_cisa_kev_csv(seen)
-    check_redhat_cve_api(seen)
+    check_cisa_kev_github_mirror(seen)
+    check_osv_ai_cloud(seen)
     check_rss_feeds(seen)
     save_seen(seen)
     print("Radar scan finished cleanly.")

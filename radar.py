@@ -2,26 +2,17 @@ import base64
 import json
 import os
 import re
-import ssl
 import certifi
 import requests
-from requests.adapters import HTTPAdapter
 import feedparser
 
 STATE_FILE = "seen_alerts.json"
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 TEST_MODE = os.environ.get("TEST_MODE", "false").lower() == "true"
 
-# Enforce strict TLS 1.2+ and verified CA certificates on every connection
-class StrictTLSAdapter(HTTPAdapter):
-    def init_poolmanager(self, *args, **kwargs):
-        ctx = ssl.create_default_context(cafile=certifi.where())
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-        kwargs["ssl_context"] = ctx
-        return super().init_poolmanager(*args, **kwargs)
-
+# Enforce strict CA certificate verification via certifi
 session = requests.Session()
-session.mount("https://", StrictTLSAdapter())
+session.verify = certifi.where()
 
 # Tailored Architect Stack: SASE, NGFW, NAC, Cloud/Identity, AI/MCP & Financial
 KEYWORDS = [
@@ -96,7 +87,6 @@ def send_architect_report(category, source, title, impact, action, link):
 
 def check_cisa_kev(seen):
     try:
-        # https://githubusercontent.com
         url = decode_url("aHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL2Npc2Fnb3Yva2V2LWRhdGEvbWFpbi9rbm93bl9leHBsb2l0ZWRfdnVsbmVyYWJpbGl0aWVzLmpzb24=")
         resp = session.get(url, timeout=20)
         if resp.status_code != 200:
@@ -129,7 +119,6 @@ def check_cisa_kev(seen):
 
 def check_osv_ai_cloud(seen):
     try:
-        # https://osv.dev
         api_url = decode_url("aHR0cHM6Ly9hcGkub3N2LmRldi92MS9xdWVyeQ==")
         osv_base = decode_url("aHR0cHM6Ly9vc3YuZGV2L3Z1bG5lcmFiaWxpdHkv")
         packages = [
@@ -166,7 +155,6 @@ def check_osv_ai_cloud(seen):
         print(f"OSV error: {e}")
 
 def check_rss_feeds(seen):
-    # Base64-encoded HTTPS URLs prevent browser clipboard domain stripping
     feeds = [
         ("MICROSOFT CLOUD & INFRA", "Microsoft MSRC", "aHR0cHM6Ly9hcGkubXNyYy5taWNyb3NvZnQuY29tL3VwZGF0ZS1ndWlkZS9yc3M=", False),
         ("NGFW & SASE PSIRT", "Palo Alto Networks PSIRT", "aHR0cHM6Ly9zZWN1cml0eS5wYWxvYWx0b25ldHdvcmtzLmNvbS9yc3MueG1s", True),
@@ -202,3 +190,14 @@ def check_rss_feeds(seen):
                     seen.add(uid)
                     continue
 
+                if not is_direct_vendor and not matches_stack(text_blob):
+                    seen.add(uid)
+                    continue
+
+                if uid not in seen or (TEST_MODE and sent < 1 and ("Microsoft MSRC" in source_name or is_direct_vendor)):
+                    impact_text = summary[:220] + "..." if summary else "Official vendor advisory published for your SASE/Firewall/Cloud stack."
+                    action_text = get_architect_action(text_blob)
+                    send_architect_report(
+                        category,
+                        source_name,
+                        title,

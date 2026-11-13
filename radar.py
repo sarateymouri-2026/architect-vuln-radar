@@ -1,6 +1,6 @@
 import json
 import os
-import gzip
+from datetime import datetime, timedelta, timezone
 import requests
 import feedparser
 
@@ -48,92 +48,125 @@ def send_alert(source, title, summary, link):
         except Exception as e:
             print(f"Slack post failed: {e}")
 
-def check_github_advisories(seen):
+def check_palo_alto_official(seen):
     try:
-        url = "https://github.com"
-        params = {"type": "reviewed", "severity": "critical,high", "per_page": 40}
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "VulnRadar-Script"
-        }
-        resp = requests.get(url, params=params, headers=headers, timeout=20)
-        if resp.status_code != 200:
-            print(f"GitHub Advisories returned HTTP {resp.status_code}: {resp.text[:100]}")
+        # Official Palo Alto PSIRT JSON endpoint
+        url = "https://security.paloaltonetworks.com/json?severity=CRITICAL&severity=HIGH&sort=-updated"
+        headers = {"Accept": "application/json", "User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=20)
+        if resp.status_code != 200 or not resp.text.strip().startswith("["):
+            print(f"Palo Alto JSON status: {resp.status_code}")
             return
-        data = resp.json()
+        items = resp.json()
         sent = 0
-        for adv in data:
-            ghsa = adv.get("ghsa_id", "")
-            uid = f"GHSA-{ghsa}"
-            if uid in seen or not ghsa:
+        for item in items[:20]:
+            cve = item.get("id", "")
+            uid = f"PAN-{cve}"
+            if uid in seen or not cve:
                 continue
-            blob = f"{adv.get('summary', '')} {adv.get('description', '')}"
-            if matches_stack(blob):
-                cve = adv.get("cve_id") or ghsa
-                send_alert(
-                    "GitHub Advisory (AI/Cloud/CI-CD)",
-                    f"{cve} ({adv.get('severity', '').upper()})",
-                    adv.get("summary", ""),
-                    adv.get("html_url", "")
-                )
-                sent += 1
+            affected = ", ".join(item.get("affected", [])) or "PAN-OS / Palo Alto"
+            send_alert(
+                "Palo Alto Networks PSIRT",
+                f"{cve}: {item.get('title', 'Security Advisory')}",
+                f"Severity: {item.get('severity')} | Affected: {affected}",
+                f"https://security.paloaltonetworks.com/{cve}"
+            )
             seen.add(uid)
-        print(f"GitHub Advisories check completed. Sent {sent} alerts.")
+            sent += 1
+        print(f"Palo Alto PSIRT check completed. Sent {sent} alerts.")
     except Exception as e:
-        print(f"GitHub Advisories error: {e}")
+        print(f"Palo Alto PSIRT error: {e}")
 
-def check_nvd_feed(seen):
+def check_nvd_api_v2(seen):
     try:
-        # Official NIST NVD Modified JSON GZIP feed (fast, reliable, no API key needed)
+        # Official NIST NVD API 2.0 (Last 72h) - covers Check Point, Zscaler, Fortinet, AI/MCP, Cloud, Financial
+        now = datetime.now(timezone.utc)
+        start = (now - timedelta(hours=72)).strftime("%Y-%m-%dT%H:%M:%S.000")
+        end = now.strftime("%Y-%m-%dT%H:%M:%S.000")
         url = "https://nist.gov"
-        resp = requests.get(url, headers={"User-Agent": "VulnRadar-Script"}, timeout=30)
+        params = {"pubStartDate": start, "pubEndDate": end, "resultsPerPage": 150}
+        resp = requests.get(url, params=params, headers={"User-Agent": "python-requests/2.31"}, timeout=30)
         if resp.status_code != 200:
-            print(f"NVD Feed HTTP {resp.status_code}")
+            print(f"NVD API v2 HTTP {resp.status_code}")
             return
-        raw_json = gzip.decompress(resp.content).decode("utf-8")
-        data = json.loads(raw_json)
-        items = data.get("CVE_Items", [])
+        items = resp.json().get("vulnerabilities", [])
         sent = 0
-        # Check the 100 most recently modified/published CVEs
-        for item in items[-100:]:
-            cve_id = item.get("cve", {}).get("CVE_data_meta", {}).get("ID", "")
+        for item in items:
+            cve_obj = item.get("cve", {})
+            cve_id = cve_obj.get("id", "")
             uid = f"NVD-{cve_id}"
             if uid in seen or not cve_id:
                 continue
-            desc_list = item.get("cve", {}).get("description", {}).get("description_data", [])
-            desc_text = desc_list[0].get("value", "") if desc_list else ""
+            descriptions = cve_obj.get("descriptions", [])
+            desc_text = next((d["value"] for d in descriptions if d.get("lang") == "en"), "")
             if matches_stack(desc_text):
                 send_alert(
-                    "NVD Critical/Recent CVE",
+                    "NVD CVE Alert (Check Point / Zscaler / AI / Cloud)",
                     cve_id,
                     desc_text[:280] + "...",
                     f"https://nist.gov{cve_id}"
                 )
                 sent += 1
             seen.add(uid)
-        print(f"NVD Feed check completed. Sent {sent} alerts.")
+        print(f"NVD API v2 check completed. Scanned {len(items)} CVEs, sent {sent} alerts.")
     except Exception as e:
-        print(f"NVD Feed error: {e}")
+        print(f"NVD API v2 error: {e}")
 
-def check_cisa_and_security_feeds(seen):
+def check_first_epss(seen):
+    try:
+        # FIRST EPSS API - flags CVEs with >60% real-world exploit probability
+        url = "https://first.org"
+        resp = requests.get(url, headers={"User-Agent": "python-requests/2.31"}, timeout=20)
+        if resp.status_code != 200:
+            print(f"EPSS API HTTP {resp.status_code}")
+            return
+        items = resp.json().get("data", [])
+        sent = 0
+        for item in items:
+            cve_id = item.get("cve", "")
+            uid = f"EPSS-{cve_id}"
+            if uid in seen or not cve_id:
+                continue
+            # Check NVD detail for matching vendor before alerting
+            nvd_resp = requests.get(f"https://nist.gov?cveId={cve_id}", timeout=15)
+            if nvd_resp.status_code == 200:
+                vulns = nvd_resp.json().get("vulnerabilities", [])
+                if vulns:
+                    descs = vulns.get("cve", {}).get("descriptions", [])
+                    desc_text = next((d["value"] for d in descs if d.get("lang") == "en"), "")
+                    if matches_stack(desc_text):
+                        score_pct = round(float(item.get("epss", 0)) * 100, 1)
+                        send_alert(
+                            f"HIGH EXPLOIT PROBABILITY (EPSS {score_pct}%)",
+                            cve_id,
+                            desc_text[:260] + "...",
+                            f"https://nist.gov{cve_id}"
+                        )
+                        sent += 1
+            seen.add(uid)
+        print(f"FIRST EPSS check completed. Sent {sent} alerts.")
+    except Exception as e:
+        print(f"FIRST EPSS error: {e}")
+
+def check_rss_feeds(seen):
     feeds = {
+        "FortiGuard PSIRT": "https://fortiguard.fortinet.com/rss/ir.xml",
         "CISA Advisories & KEV": "https://cisa.gov",
-        "FortiGuard PSIRT": "https://fortinet.com",
+        "Unit 42 (Palo Alto Threat Intel)": "https://paloaltonetworks.com",
         "BleepingComputer": "https://bleepingcomputer.com",
-        "The Hacker News": "https://feedburner.com",
-        "Dark Reading": "https://darkreading.com"
+        "The Hacker News": "https://feedburner.com"
     }
     for source_name, feed_url in feeds.items():
         try:
             resp = requests.get(feed_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
             parsed = feedparser.parse(resp.content)
             sent = 0
-            for entry in parsed.entries[:20]:
+            for entry in parsed.entries[:15]:
                 uid = f"RSS-{entry.get('id', entry.get('link'))}"
                 if uid in seen:
                     continue
                 text_blob = f"{entry.get('title', '')} {entry.get('summary', '')}"
-                if source_name in ["CISA Advisories & KEV", "FortiGuard PSIRT"] or matches_stack(text_blob):
+                if source_name in ["FortiGuard PSIRT", "CISA Advisories & KEV", "Unit 42 (Palo Alto Threat Intel)"] or matches_stack(text_blob):
                     send_alert(
                         source_name,
                         entry.get("title", "New Advisory"),
@@ -148,9 +181,10 @@ def check_cisa_and_security_feeds(seen):
 
 def main():
     seen = load_seen()
-    check_github_advisories(seen)
-    check_nvd_feed(seen)
-    check_cisa_and_security_feeds(seen)
+    check_palo_alto_official(seen)
+    check_nvd_api_v2(seen)
+    check_first_epss(seen)
+    check_rss_feeds(seen)
     save_seen(seen)
     print("Radar scan finished cleanly.")
 

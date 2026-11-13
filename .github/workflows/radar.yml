@@ -47,6 +47,6 @@ jobs:
           git add seen_alerts.json
           if ! git diff --staged --quiet; then
             git commit -m "Update seen alerts"
-            git pull --rebase origin main
+            git pull --rebase -X ours origin main
             git push
           fi

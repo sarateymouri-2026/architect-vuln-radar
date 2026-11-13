@@ -8,22 +8,24 @@ STATE_FILE = "seen_alerts.json"
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 TEST_MODE = os.environ.get("TEST_MODE", "false").lower() == "true"
 
-# Precision-Tuned for Your Exact Architecture Stack
+# Tailored Architect Stack: SASE, NGFW, NAC, Cloud/Identity, AI/MCP & Financial
 KEYWORDS = [
     # SASE & Zero Trust
     "zscaler", "zia", "zpa", "client connector", "zdx",
     "prisma access", "prisma sase", "fortisase", "harmony sase", "harmony connect",
-    # NGFW, VPN & Network Access Control
+    # NGFW, VPN & NAC
     "palo alto", "pan-os", "panorama", "globalprotect",
     "fortinet", "fortigate", "fortios", "fortimanager", "fortianalyzer", "fortiproxy",
     "check point", "checkpoint", "quantum", "gaia", "smartconsole",
-    "cisco ise", "identity services engine", "cisco asa", "adaptive security appliance", "ftd", "firepower",
-    # Cloud & Identity Plane
-    "aws", "amazon web services", "azure", "entra", "entra id", "active directory", "okta",
-    # AI, MCP & CI/CD Pipelines
-    "mcp", "model context protocol", "langchain", "openai", "anthropic", "agentic",
-    "gitlab", "github", "terraform", "kubernetes", "docker", "argocd",
-    # Financial / EU DORA Core
+    "cisco ise", "identity services engine", "cisco asa", "ftd", "firepower",
+    # Microsoft Cloud, Identity & Infrastructure
+    "azure", "entra", "active directory", "exchange", "sharepoint", "ad fs",
+    "mcp gateway", "agents sdk", "openai", "copilot", "kubernetes", "devops",
+    "dns server", "dhcp server", "rd gateway", "remote desktop gateway", "rras", "nps",
+    # AWS, AI/MCP & CI/CD
+    "aws", "amazon web services", "mcp", "model context protocol", "langchain",
+    "gitlab", "github", "terraform", "docker", "argocd",
+    # Financial / EU Core
     "swift", "dora", "weblogic", "oracle", "sap", "f5", "big-ip", "ivanti", "citrix", "netscaler"
 ]
 
@@ -51,13 +53,13 @@ def matches_stack(text):
 def get_architect_action(text_blob):
     t = text_blob.lower()
     if any(k in t for k in ["zscaler", "zia", "zpa", "prisma access", "fortisase", "harmony"]):
-        return "Verify SASE tunnel posture, ZPA App Connector versions, and Client Connector auto-update rings."
+        return "Verify SASE tunnel posture, ZPA App Connector versions, and Client Connector update rings."
     if any(k in t for k in ["pan-os", "globalprotect", "fortigate", "fortios", "check point", "gaia", "asa", "ftd", "firepower"]):
-        return "Restrict external management plane access, inspect SSL-VPN/GlobalProtect portals, and apply IPS virtual patches."
-    if any(k in t for k in ["ise", "identity services", "entra", "azure", "aws"]):
-        return "Audit Conditional Access / RADIUS policies, administrative RBAC roles, and API token scopes."
-    if any(k in t for k in ["mcp", "model context", "langchain", "kubernetes", "terraform", "gitlab", "github"]):
-        return "Audit MCP server tool permissions, CI/CD runner secrets, and container base images."
+        return "Restrict external management plane access, inspect VPN portals, and apply IPS virtual patches."
+    if any(k in t for k in ["ise", "entra", "azure", "active directory", "ad fs", "exchange", "nps"]):
+        return "Audit Conditional Access / RADIUS policies, administrative RBAC roles, and out-of-band patches."
+    if any(k in t for k in ["mcp", "agents sdk", "openai", "copilot", "kubernetes", "terraform", "gitlab", "github"]):
+        return "Audit MCP gateway/server permissions, AI agent token scopes, and CI/CD runner secrets."
     return "Assess exposure across perimeter, SASE, and cloud control planes; coordinate urgent patch window."
 
 def send_architect_report(category, source, title, impact, action, link):
@@ -144,26 +146,25 @@ def check_osv_ai_cloud(seen):
         print(f"OSV error: {e}")
 
 def check_rss_feeds(seen):
-    # Format: (Category, Source Name, Host, Path, Direct Vendor Flag)
+    # Only verified direct XML endpoints that never 403 on GitHub Actions
     feeds = [
-        ("SASE & ZTNA", "Zscaler Help & Advisories", "help.zscaler.com", "/rss", True),
-        ("SASE & CLOUD TRUST", "Zscaler Trust", "trust.zscaler.com", "/rss", True),
-        ("NGFW & SASE RESEARCH", "Check Point Research", "://checkpoint.com", "/feed/", True),
+        ("MICROSOFT CLOUD & INFRA", "Microsoft MSRC", "://microsoft.com", "/update-guide/rss", False),
         ("NGFW & SASE PSIRT", "Palo Alto Networks PSIRT", "://paloaltonetworks.com", "/rss.xml", True),
-        ("NGFW & SASE PSIRT", "FortiGuard PSIRT", "://fortinet.com", "/rss/ir.xml", True),
-        ("NAC & FIREWALL PSIRT", "Cisco Security Advisories", "://cisco.com", "/security/center/psirtrss20/CiscoSecurityAdvisory.xml", True),
-        ("GOVERNMENT & INFRA", "CISA Advisories", "www.cisa.gov", "/cybersecurity-advisories/all.xml", True),
+        ("NGFW & SASE PSIRT", "FortiGuard PSIRT", "://fortinet.com", "/fortiguard/rss/ir.xml", True),
+        ("NGFW & SASE RESEARCH", "Check Point Research", "://checkpoint.com", "/category/threat-intelligence-reports/feed/", True),
+        ("NAC & FIREWALL PSIRT", "Cisco Security Advisories", "://cisco.com", "/security/center/psirtrss20/CiscoSecurityAdvisory.xml", False),
         ("THREAT INTELLIGENCE", "Palo Alto Unit 42", "://paloaltonetworks.com", "/feed/", True),
-        ("ZERO-DAYS & CLOUD INTEL", "The Hacker News", "://feedburner.com", "/TheHackersNews", False),
-        ("SASE & BREACH INTEL", "BleepingComputer", "://bleepingcomputer.com", "/feed/", False),
-        ("FINANCIAL & ENTERPRISE", "SecurityWeek", "://feedburner.com", "/securityweek", False)
+        ("SPAIN / EU CERT", "INCIBE-CERT", "www.incibe.es", "/incibe-cert/alerta-temprana/avisos/feed", False),
+        ("ZERO-DAYS & ZSCALER/CP INTEL", "The Hacker News", "://feedburner.com", "/TheHackersNews", False),
+        ("SASE & BREACH INTEL", "BleepingComputer", "://bleepingcomputer.com", "/feed/", False)
     ]
     for category, source_name, host, path, is_direct_vendor in feeds:
         try:
             feed_url = build_url("https", host, path)
-            resp = requests.get(feed_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+            resp = requests.get(feed_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=25)
             parsed = feedparser.parse(resp.content)
-            entries = parsed.entries[:15]
+            limit = 60 if "Microsoft MSRC" in source_name else 15
+            entries = parsed.entries[:limit]
             sent = 0
             for entry in entries:
                 uid = f"RSS-{entry.get('id', entry.get('link'))}"
@@ -171,20 +172,21 @@ def check_rss_feeds(seen):
                 summary = clean_html(entry.get("summary", ""))
                 text_blob = f"{title} {summary}"
 
+                # Strip out MSRC acknowledgement-only edits
+                if "Microsoft MSRC" in source_name and "informational change only" in summary.lower():
+                    seen.add(uid)
+                    continue
+
                 # Skip LOW severity noise from Palo Alto
                 if "Palo Alto" in source_name and "(Severity: LOW)" in title:
                     seen.add(uid)
                     continue
 
-                # For broad Cisco feed, filter to ISE / ASA / FTD / Firepower / IOS XE so you don't get VoIP phone noise
-                if "Cisco" in source_name and not matches_stack(text_blob):
+                if not is_direct_vendor and not matches_stack(text_blob):
                     seen.add(uid)
                     continue
 
-                if not is_direct_vendor and not matches_stack(text_blob):
-                    continue
-
-                if uid not in seen or (TEST_MODE and sent < 1 and is_direct_vendor):
+                if uid not in seen or (TEST_MODE and sent < 1 and ("Microsoft MSRC" in source_name or is_direct_vendor)):
                     impact_text = summary[:220] + "..." if summary else "Official vendor advisory published for your SASE/Firewall/Cloud stack."
                     action_text = get_architect_action(text_blob)
                     send_architect_report(
@@ -203,8 +205,3 @@ def check_rss_feeds(seen):
 
 def main():
     print(f"Starting Architect Radar Scan (TEST_MODE={TEST_MODE})...")
-    seen = load_seen()
-    check_cisa_kev(seen)
-    check_osv_ai_cloud(seen)
-    check_rss_feeds(seen)
-    save_seen(seen)

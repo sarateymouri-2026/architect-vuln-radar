@@ -139,6 +139,7 @@ def check_rss(seen):
         ("NAC & FIREWALL", "Cisco Security", "aHR0cHM6Ly9zZWMuY2xvdWRhcHBzLmNpc2NvLmNvbS9zZWN1cml0eS9jZW50ZXIvcHNpcnRyc3MyMC9DaXNjb1NlY3VyaXR5QWR2aXNvcnkueG1s", False),
         ("THREAT INTEL", "Palo Alto Unit 42", "aHR0cHM6Ly91bml0NDIucGFsb2FsdG9uZXR3b3Jrcy5jb20vZmVlZC8=", True),
         ("ZERO-DAY INTEL", "The Hacker News", "aHR0cHM6Ly9mZWVkcy5mZWVkYnVybmVyLmNvbS9UaGVIYWNrZXJzTmV3cw==", False),
+        ("SASE & THREAT INTEL", "Zscaler ThreatLabz", "aHR0cHM6Ly93d3cuenNjYWxlci5jb20vYmxvZ3MvZmVlZHMvc2VjdXJpdHktcmVzZWFyY2g=", True),
         ("SASE & BREACHES", "BleepingComputer", "aHR0cHM6Ly93d3cuYmxlZXBpbmdjb21wdXRlci5jb20vZmVlZC8=", False)
     ]
     for cat, src, b64, direct in feeds:
